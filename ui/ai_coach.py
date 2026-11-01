@@ -135,8 +135,30 @@ def render() -> None:
                         f"📦 Proposal · {prop.get('scope')} · {prop.get('created_at','')[:10]}</div>"
                         f"<div style='font-size:.88rem;white-space:pre-wrap'>{text}</div></div>",
                         unsafe_allow_html=True)
-            kit.ai_card("Decision needed", "", "", key=f"prop_{prop['id']}"[:18])
+            card_key = f"prop_{prop['id']}"[:18]
+            kit.ai_card("Your decision", text, "", footer_meta="Approving records the decision; "
+                        "it never edits your tasks by itself.", key=card_key)
+            # persist the staged decision (Approve/Edit/Reject) via approvals service
+            kit.consume_ai_decision(card_key, prop["id"])
             st.divider()
+
+        st.markdown("#### 🗂 Approval history")
+        history = source.load_decisions()
+        if not history:
+            kit.empty_state("No decisions yet — approve or reject a proposal above "
+                            "and it will be logged here permanently.", "🗳")
+        for d in history[:10]:
+            tone = {"approve": "green", "reject": "red", "edit": "amber"}.get(d.get("action"), "gray")
+            action_label = {"approve": "✅ Approved", "reject": "❌ Rejected",
+                            "edit": "✏️ Edited"}.get(d.get("action"), d.get("action"))
+            st.markdown(
+                f"<div class='p-notice' style='margin:.3rem 0'>"
+                f"<span class='p-badge p-badge-{tone}'>{action_label}</span> "
+                f"<code style='font-size:.72rem'>{str(d.get('proposal_id'))[:8]}</code> · "
+                f"<span style='font-size:.76rem;color:{TOKENS['muted']}'>"
+                f"{str(d.get('decided_at'))[:16].replace('T', ' ')}</span>"
+                f"{('<div style=\"font-size:.78rem;margin-top:.2rem\">📝 ' + str(d.get('notes')) + '</div>') if d.get('notes') else ''}"
+                f"</div>", unsafe_allow_html=True)
 
         st.markdown("#### 📊 Career gap analysis (Python)")
         gaps = context["skill_gaps"]
@@ -148,5 +170,6 @@ def render() -> None:
                        f"**{g['name']}**: L{g['level']} → L{g['target']} "
                        f"({gap_size} level(s) to go, {g.get('min_per_week', 120)} min/wk planned)")
 
-        st.caption(f"Model: gemini-2.5-flash when configured · "
+        from config.settings import settings as _settings
+        st.caption(f"Model: {_settings.GEMINI_MODEL} when configured · "
                    f"AI is {'✅ configured' if get_ai()[1] is None else '💰 not configured — deterministic fallback in use'}")

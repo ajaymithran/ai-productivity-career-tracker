@@ -47,3 +47,40 @@ def test_missing_required_returns_issue():
     clean, issues = validate(df, "tasks", m)
     assert clean.empty
     assert issues and "'title'" in issues[0]
+
+
+def test_import_rows_skips_duplicates(monkeypatch):
+    """Re-imports never duplicate data: existing titles (case-insensitive)
+    plus rows inserted during this same run are skipped."""
+    import db.crud as crud
+    from core.importer import import_rows
+
+    inserted = []
+    monkeypatch.setattr(crud, "list_rows", lambda client, table: [{"title": "Alpha"}])
+    def fake_insert(client, table, payload, *, user_id):
+        inserted.append(payload)
+        return {"id": "new"}
+    monkeypatch.setattr(crud, "insert_row", fake_insert)
+
+    rows = pd.DataFrame([
+        {"title": "Alpha", "notes": "dupe of existing"},
+        {"title": "Beta"},
+        {"title": "beta"},          # case-insensitive dupe of row just inserted
+    ])
+    imported, errors, skipped = import_rows(object(), "tasks", rows, "u1")
+    assert imported == 1 and skipped == 2 and errors == []
+    assert [p["title"] for p in inserted] == ["Beta"]
+
+
+def test_import_rows_reports_insert_errors(monkeypatch):
+    import db.crud as crud
+    from core.importer import import_rows
+
+    monkeypatch.setattr(crud, "list_rows", lambda client, table: [])
+    def bad_insert(client, table, payload, *, user_id):
+        raise RuntimeError("permission denied")
+    monkeypatch.setattr(crud, "insert_row", bad_insert)
+
+    rows = pd.DataFrame([{"title": "X"}])
+    imported, errors, skipped = import_rows(object(), "tasks", rows, "u1")
+    assert imported == 0 and skipped == 0 and errors and "permission denied" in errors[0]

@@ -35,7 +35,7 @@ def get_ai():
     def generate(prompt: str, *, system: str = "") -> str:
         """One-shot text generation; raises on API errors (caller shows them)."""
         response = _client.models.generate_content(
-            model="gemini-2.5-flash",
+            model=settings.GEMINI_MODEL,
             contents=prompt,
             config={"system_instruction": system} if system else None,
         )

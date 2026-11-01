@@ -190,7 +190,12 @@ def confirm_delete(task_id: str, label: str) -> bool:
 # ---------------- AI recommendation card ----------------
 def ai_card(title: str, body: str, reason: str = "", footer_meta: str = "",
             demo_ctx: dict | None = None, key: str = "rec") -> None:
-    """AI recommendation with explicit Approve / Edit / Reject."""
+    """AI recommendation with explicit Approve / Edit / Reject.
+
+    Buttons only stage the decision in session state — the PAGE consumes
+    it by popping f"{key}_record" and persisting via the approvals service.
+    This keeps the component presentational and the audit trail in data.
+    """
     st.markdown(f"""
     <div class="p-card" style="border:1px solid {TOKENS['primary']}33;">
       <div style="font-weight:700;color:{NAVY};margin-bottom:.2rem">🤖 {title}</div>
@@ -200,23 +205,45 @@ def ai_card(title: str, body: str, reason: str = "", footer_meta: str = "",
     </div>""", unsafe_allow_html=True)
     b1, b2, b3, _ = st.columns([1, 1, 1, 4])
     if b1.button("✅ Approve", key=f"{key}_ap", type="primary"):
-        st.session_state[f"{key}_decision"] = "approved"
+        st.session_state[f"{key}_decision"] = "approve"
     if b2.button("✏️ Edit", key=f"{key}_ed"):
         st.session_state[f"{key}_decision"] = "edit"
     if b3.button("❌ Reject", key=f"{key}_rj"):
-        st.session_state[f"{key}_decision"] = "rejected"
+        st.session_state[f"{key}_decision"] = "reject"
     decision = st.session_state.pop(f"{key}_decision", None)
     if decision == "edit":
-        with st.expander("Edit before approving", expanded=True):
+        with st.expander("Edit before deciding", expanded=True):
             edited = st.text_area("Adjusted advice", body, key=f"{key}_edit_ta")
-            if st.button("Save as approved", key=f"{key}_edit_ok", type="primary"):
-                st.session_state[f"{key}_decision"] = "approved"
-                st.toast("Saved your edited version", icon="✅")
-                st.session_state[f"{key}_edited_text"] = edited
-    if decision == "approved":
-        st.success("Approved — recorded in your decision history. Nothing changed silently.")
-    elif decision == "rejected":
-        st.info("Rejected — noted and kept in history; no changes were made.")
+            if st.button("Save edited version", key=f"{key}_edit_ok", type="primary"):
+                st.session_state[f"{key}_decision"] = f"edit::{edited}"
+                st.rerun()
+    elif decision == "approve":
+        st.session_state[f"{key}_record"] = ("approve", "")
+        st.toast("Approved", icon="✅")
+        st.rerun()
+    elif decision == "reject":
+        st.session_state[f"{key}_record"] = ("reject", "")
+        st.toast("Rejected — nothing changed", icon="❌")
+        st.rerun()
+    elif isinstance(decision, str) and decision.startswith("edit::"):
+        st.session_state[f"{key}_record"] = ("edit", decision[len("edit::"):])
+        st.toast("Edited decision saved", icon="✏️")
+        st.rerun()
+    # feedback after the page consumes + reruns: show the durable result
+    if st.session_state.get(f"{key}_record"):
+        st.success("Decision recorded in your approval history. Nothing was changed silently.")
+
+
+def consume_ai_decision(key: str, proposal_id: str) -> tuple | None:
+    """Pop a staged decision for this card and persist it through the
+    approvals service. Returns (action, notes) when something was recorded."""
+    from data import source
+    staged = st.session_state.pop(f"{key}_record", None)
+    if not staged:
+        return None
+    action, notes = staged
+    source.record_app_decision(proposal_id, action, notes)
+    st.rerun()
 
 
 # ---------------- notifications ----------------

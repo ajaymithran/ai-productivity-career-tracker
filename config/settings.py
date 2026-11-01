@@ -27,6 +27,8 @@ class Settings:
 
     # --- Gemini ---
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+    # Configurable provider model: override with GEMINI_MODEL in .env
+    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
     # --- App behaviour ---
     APP_NAME: str = "AI Productivity & Career Tracker"

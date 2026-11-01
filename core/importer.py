@@ -132,17 +132,34 @@ def validate(df: pd.DataFrame, entity: str, mapping: dict[str, str]) -> tuple[pd
     return clean, issues
 
 
-def import_rows(client, entity: str, rows: pd.DataFrame, user_id: str) -> tuple[int, list[str]]:
-    """Insert validated rows via the audited CRUD layer. UI calls this only
-    after the user has seen and approved the preview."""
-    from db.crud import insert_row
-    errors: list[str] = []
-    n = 0
+def import_rows(client, entity: str, rows: pd.DataFrame, user_id: str
+                ) -> tuple[int, list[str], int]:
+    """Insert validated rows via the audited CRUD layer, skipping any row whose
+    key field (title/name, case-insensitive) already exists — dedup protection
+    so a re-import never duplicates your data. UI calls this only after the
+    user has seen and approved the preview.
+    Returns (imported_count, errors, skipped_count)."""
+    from db.crud import insert_row, list_rows
+    key_field = REQUIRED[entity][0]
+    try:
+        existing = list_rows(client, entity)
+        seen = {str(r.get(key_field, "")).strip().lower() for r in existing}
+    except Exception as exc:
+        seen = set()                     # can't read existing rows -> insert unchecked
+        errors = [f"dedup disabled (could not list existing rows: {str(exc)[:80]})"]
+    else:
+        errors = []
+    imported, skipped = 0, 0
     for _, r in rows.iterrows():
         payload = {k: (None if pd.isna(v) else v) for k, v in r.items()}
+        key_val = str(payload.get(key_field, "")).strip().lower()
+        if key_val and key_val in seen:
+            skipped += 1
+            continue
         try:
             insert_row(client, entity, payload, user_id=user_id)
-            n += 1
+            seen.add(key_val)
+            imported += 1
         except Exception as exc:
-            errors.append(f"row {n + 1}: {str(exc)[:110]}")
-    return n, errors
+            errors.append(f"row {imported + skipped + 1}: {str(exc)[:110]}")
+    return imported, errors, skipped

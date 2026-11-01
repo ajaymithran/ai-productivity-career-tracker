@@ -34,11 +34,12 @@ def _ai_daily_card(tasks: list[dict], availability: int) -> None:
         reason = "Empty list, empty plan."
     with st.container():
         kit.ai_card("Today's recommended plan (deterministic)", body, reason,
-                    footer_meta="Demo seed — approved plans never touch your tasks "
-                                "without your click.",
+                    footer_meta="Approve records your decision — your tasks are "
+                                "never touched without your click.",
                     key="dash_ai")
         if used > availability:
             st.warning(f"Overload check: {used} min > {availability} min availability.")
+        kit.consume_ai_decision("dash_ai", "dash_daily_plan")
 
 
 def render() -> None:

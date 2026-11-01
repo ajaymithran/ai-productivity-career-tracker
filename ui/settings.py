@@ -1,5 +1,7 @@
 """PAGE 8 — Settings: profile, availability, notifications, AI status,
 data import/export, backup info. Never displays API secrets."""
+import datetime as dtnow
+
 import pandas as pd
 import streamlit as st
 
@@ -105,30 +107,47 @@ def render() -> None:
         with st.container():
             st.markdown("<div class='p-card' style='margin-top:.7rem'>", unsafe_allow_html=True)
             st.markdown("##### 📤 Data export")
-            table = st.selectbox("Table", EXPORT_TABLES, key="exp_t")
-            if st.button("Download CSV", key="exp_btn"):
-                if source.mode() != "demo":
-                    st.info("Live export reads your real rows from Supabase.")
+            mode = source.mode()
+            a1, a2 = st.columns(2)
+            # --- full workbook export (every table, one sheet each) ---
+            xlsx_bytes = None
+            if a1.button("⬇️ Export all to Excel", key="exp_all",
+                         help="One .xlsx workbook — one sheet per table.", type="primary"):
+                try:
+                    from core import exporter
+                    xlsx_bytes = exporter.export_all_xlsx()
+                except Exception as exc:
+                    st.error(f"Export failed: {str(exc)[:160]}")
+            if xlsx_bytes:
+                a1.download_button("💾 Save ajay_tracker_export.xlsx", xlsx_bytes,
+                                   file_name=f"ajay_tracker_export_"
+                                             f"{dtnow.date.today().isoformat()}.xlsx",
+                                   mime="application/vnd.openxmlformats"
+                                        "-officedocument.spreadsheetml.sheet",
+                                   key="exp_all_dl")
+            # --- single-table CSV ---
+            table = st.selectbox("Single table (CSV)", EXPORT_TABLES, key="exp_t")
+            if a2.button("Download CSV", key="exp_btn"):
+                from data.demo_data import data as dd
+                rows = (dd().get(table) if mode == "demo"
+                        else source.load_tasks(active_only=False) if table == "tasks" and mode != "demo"
+                        else [])
+                if not rows:
+                    kit.empty_state(f"Nothing in `{table}` yet.", "📤")
                 else:
-                    from data.demo_data import data as dd
-                    rows = {"tasks": dd()["tasks"], "skills": dd()["skills"],
-                            "goals": dd()["goals"]}.get(table, dd()[table] if table in dd() else None)
-                    if not rows:
-                        kit.empty_state(f"Nothing in `{table}` yet.", "📤")
-                    else:
-                        csv = pd.DataFrame(rows).to_csv(index=False).encode("utf-8")
-                        st.download_button("⬇️ Save file", csv,
-                                           file_name=f"{table}_demo.csv", mime="text/csv",
-                                           key="exp_dl")
-            st.caption("Tip: export weekly to your own disk; the database is the "
-                       "single source of truth.")
+                    csv = pd.DataFrame(rows).to_csv(index=False).encode("utf-8")
+                    a2.download_button("⬇️ Save file", csv,
+                                       file_name=f"{table}_{mode}.csv", mime="text/csv",
+                                       key="exp_dl")
+            st.caption(f"Mode: **{mode}** — export always reflects real stored records. "
+                       "Keep weekly backups on your own disk.")
             st.markdown("</div>", unsafe_allow_html=True)
 
         with st.container():
             st.markdown("<div class='p-card' style='margin-top:.7rem'>", unsafe_allow_html=True)
             st.markdown("##### 📥 Import from Excel workbook")
             st.caption("Your original file is never modified; mapping is verified "
-                       "before anything lands.")
+                       "before anything lands. Duplicates are skipped automatically.")
             file = st.file_uploader("Workbook (.xlsx)", type=["xlsx", "xls"], key="imp_up")
             if file:
                 from core import importer as imp
@@ -143,7 +162,7 @@ def render() -> None:
                     clean, issues = imp.validate(df, entity, mapping)
                     for msg in issues:
                         st.warning(msg)
-                    if clean.empty:
+                    if clean is None or clean.empty:
                         st.info("Nothing importable found.")
                     else:
                         st.caption(f"{len(clean)} row(s) ready — preview:")
@@ -151,8 +170,24 @@ def render() -> None:
                         confirm = st.checkbox("I reviewed the preview — import these rows",
                                               key="imp_ok")
                         if confirm and st.button("Import", type="primary", key="imp_go"):
-                            st.success(f"Imported (demo flow) {len(clean)} row(s) into "
-                                       f"`{entity}` — every action is auditable in live mode.")
+                            if source.mode() == "live":
+                                from data.source import _db
+                                from db import queries
+                                client, err = _db()
+                                if err or client is None:
+                                    st.error(f"Import needs the database: {err}")
+                                else:
+                                    uid = queries.current_user_id(client)
+                                    imported_n, errors, skipped = imp.import_rows(
+                                        client, entity, clean, uid)
+                                    for msg in errors:
+                                        st.warning(msg)
+                                    st.success(f"Imported {imported_n} row(s) into `{entity}`; "
+                                               f"{skipped} duplicate(s) skipped.")
+                            else:
+                                st.info("Row import writes to the cloud database — add "
+                                        "Supabase credentials in `.env` (local mode "
+                                        "persists new tasks you add in the app).")
                 except Exception as exc:
                     st.error(f"Could not read workbook: {str(exc)[:160]}")
             st.markdown("</div>", unsafe_allow_html=True)

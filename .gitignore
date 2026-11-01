@@ -4,6 +4,9 @@
 # Backups with personal data
 backups/
 
+# Local-mode persistence database (personal data when local mode is used)
+tracker_local.db
+
 # Python artifacts
 __pycache__/
 *.pyc
