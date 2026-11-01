@@ -1,0 +1,16 @@
+# Secrets — NEVER commit
+.env
+
+# Backups with personal data
+backups/
+
+# Python artifacts
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# OS noise
+.DS_Store
+desktop.ini
+Thumbs.db

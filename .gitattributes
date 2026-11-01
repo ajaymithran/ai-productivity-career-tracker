@@ -1,0 +1,6 @@
+# Normalize line endings: LF in the repo, Git handles conversion on checkout.
+# Prevents noisy "LF will be replaced by CRLF" warnings on Windows.
+* text=auto eol=lf
+
+*.pyc binary
+uv.lock binary
