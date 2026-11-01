@@ -1,140 +1,144 @@
-"""Projects — milestones, deadlines, progress, blockers, GitHub links."""
+"""PAGE 3 — Projects: overview cards, Kanban, detail with milestone timeline."""
 from datetime import date
 
 import streamlit as st
 
-from db import crud
-from ui.components.ui_kit import empty_state, status_badge
+import data.source as source
+from ui.components import ui_kit as kit
+from ui.design import TOKENS
+
+KANBAN_COLS = ["pending", "in_progress", "review", "done"]
+KANBAN_LABEL = {"pending": "📋 To Do", "in_progress": "🚧 In Progress",
+                "review": "🔍 Review", "done": "✅ Completed"}
 
 
-@st.cache_resource
-def _sup():
-    from db.client import get_supabase
-    return get_supabase()
+def _progress(p: dict, milestones: list[dict]) -> tuple[int, int]:
+    ms = [m for m in milestones if m.get("project_id") == p["id"]]
+    return sum(1 for m in ms if m.get("status") == "done"), len(ms)
 
 
-def _project_progress(client, project_id: str) -> tuple[int, int]:
-    ms = crud.list_rows(client, "milestones", filters={"project_id": project_id},
-                        order_by="position")
-    done = sum(1 for m in ms if m["status"] == "done")
-    return done, len(ms)
-
-
-def _milestone_block(client, uid, project: dict) -> None:
-    with st.expander("🧩 Milestones, blockers & notes", expanded=False):
-        done, total = _project_progress(client, project["id"])
-        st.progress(done / total if total else 0.0,
-                    text=f"{done}/{total} milestones done")
-
-        ms = crud.list_rows(client, "milestones", filters={"project_id": project["id"]},
-                            order_by="position")
+def _detail_expander(p: dict, ms: list[dict]) -> None:
+    with st.expander("🧭 Project detail — milestone timeline", expanded=False):
+        ms = sorted(ms, key=lambda m: (m.get("position", 0), m.get("due_date") or ""))
+        if not ms:
+            kit.empty_state("No milestones yet — add one below.", "🧩")
         for m in ms:
-            c1, c2, c3 = st.columns([5, 2, 1.4])
-            c1.markdown(f"**{m['title']}** {status_badge(m['status'])}",
-                        unsafe_allow_html=True)
-            if m["status"] == "blocked" and m.get("blocker"):
-                c1.caption(f"⛔ {m['blocker']}")
-            c2.caption(f"due {str(m.get('due_date') or '—')[:10]}")
-            if c3.button("✓", key=f"ms_{m['id']}", help="Toggle done/pending"):
-                new = "pending" if m["status"] == "done" else "done"
-                crud.update_row(client, "milestones", m["id"], {"status": new}, user_id=uid)
-                st.rerun()
-
-        with st.form(f"addms_{project['id']}", border=False):
-            title = st.text_input("New milestone", key=f"mt_{project['id']}")
-            d1, d2 = st.columns(2)
-            due = d1.date_input("Due (optional)", key=f"md_{project['id']}", value=None)
-            pos = d2.number_input("Order", 0, 99, len(ms), key=f"mp_{project['id']}")
-            blocker = st.text_input("Blocker note (optional)", key=f"mb_{project['id']}")
+            dot = {"done": TOKENS["success"], "in_progress": TOKENS["primary"],
+                   "blocked": TOKENS["danger"]}.get(m.get("status"), "#94A3B8")
+            st.markdown(
+                f"<span class='p-timeline-dot' style='background:{dot};margin-right:.5rem'></span>"
+                f"<b>{m['title']}</b> {kit.status_badge(m.get('status'))} "
+                f"<span style='color:{TOKENS['muted']};font-size:.8rem'>due "
+                f"{str(m.get('due_date') or '—')[:10]}"
+                + (f" · ⛔ {m['blocker']}" if m.get('blocker') and m['status'] == 'blocked' else "")
+                + "</span>", unsafe_allow_html=True)
+        with st.form(f"msadd_{p['id']}", border=False):
+            title = st.text_input("New milestone", key=f"mst_{p['id']}")
+            c1, c2 = st.columns(2)
+            due = c1.date_input("Due", key=f"msd_{p['id']}", value=None)
+            blocker = c2.text_input("Blocker (optional)", key=f"msb_{p['id']}")
             if st.form_submit_button("Add milestone") and title.strip():
-                stt = "blocked" if blocker.strip() else "pending"
-                crud.insert_row(client, "milestones",
-                                {"title": title.strip(), "project_id": project["id"],
-                                 "position": int(pos),
-                                 "due_date": due if due else None,
-                                 "status": stt,
-                                 "blocker": blocker.strip() or None}, user_id=uid)
-                st.rerun()
-
-        if project.get("notes") or project.get("blockers"):
-            st.caption(f"📁 Project notes: {project.get('notes') or '—'} | "
-                       f"blockers: {project.get('blockers') or '—'}")
-
-
-def _project_card(client, uid: str, p: dict) -> None:
-    with st.container(border=True):
-        c1, c2, c3 = st.columns([4, 2, 1.6])
-        c1.markdown(f"### {p['name']} &nbsp;{status_badge(p['status'])}", unsafe_allow_html=True)
-        gh = p.get("github_url")
-        c2.markdown(f"[GitHub repo]({gh})" if gh else "",
-                    unsafe_allow_html=True) if gh else c2.caption("no repo link")
-        dd = c3
-        target = str(p.get("target_date") or "—")[:10]
-        late = target != "—" and target < date.today().isoformat() and p["status"] not in ("done", "dropped")
-        dd.markdown(f"🎯 {target}{' :red[(late)]' if late else ''}")
-
-        if p.get("description"):
-            st.caption(p["description"])
-
-        tabs = st.tabs(["🧩 Milestones", "✍️ Edit", "🗑 Delete"])
-        with tabs[0]:
-            _milestone_block(client, uid, p)
-        with tabs[1]:
-            with st.form(f"editp_{p['id']}", border=False):
-                name = st.text_input("Name", p["name"], key=f"pn_{p['id']}")
-                desc = st.text_area("Description", p.get("description") or "", key=f"pd_{p['id']}")
-                g1, g2 = st.columns(2)
-                gh2 = g1.text_input("GitHub URL", gh or "", key=f"pg_{p['id']}")
-                stat = g2.select_slider("Status", ["planning", "in_progress", "paused",
-                                                   "done", "dropped"], p["status"])
-                tgt = st.date_input("Target date", key=f"pt_{p['id']}",
-                                    value=date.fromisoformat(target) if target != "—" else None)
-                blockers = st.text_area("Blockers summary", p.get("blockers") or "", key=f"pb_{p['id']}")
-                if st.form_submit_button("Save", type="primary"):
-                    crud.update_row(client, "projects", p["id"],
-                                    {"name": name, "description": desc,
-                                     "github_url": gh2.strip() or None,
-                                     "status": stat,
-                                     "target_date": tgt if tgt else None,
-                                     "blockers": blockers or None}, user_id=uid)
+                if source.mode() != "demo":
+                    st.info("Milestone creation lands with DB wiring — demo only shows the flow.")
+                else:
+                    from data.demo_data import data as dd
+                    dd()["milestones"].append({
+                        "id": f"demo-m{len(dd()['milestones'])+1}",
+                        "project_id": p["id"], "title": title.strip(),
+                        "position": len(ms) + 1,
+                        "due_date": due.isoformat() if due else None,
+                        "status": "blocked" if blocker.strip() else "pending",
+                        "blocker": blocker.strip() or None, "user_id": "demo"})
+                    st.toast("Milestone added (demo)", icon="🧩")
                     st.rerun()
-        with tabs[2]:
-            st.write("Deleting a project **cascades** to its milestones. Tasks keep but lose the link.")
-            if st.button("Delete project", key=f"delp_{p['id']}"):
-                crud.delete_row(client, "projects", p["id"], user_id=uid, label=p["name"])
-                st.rerun()
+
+
+def _project_card(p: dict, milestones: list[dict]) -> None:
+    with st.container():
+        st.markdown(f"""
+        <div class="p-card">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <b style="color:{TOKENS['navy'] if 'navy' in TOKENS else TOKENS['sidebar']}">{p['name']}</b>
+            <span>{kit.status_badge(p['status'])}</span>
+          </div>
+          <div style="color:{TOKENS['muted']};font-size:.85rem;margin:.2rem 0 .5rem">
+            {p.get('description') or ''}
+          </div>
+        </div>""", unsafe_allow_html=True)
+        c1, c2, c3 = st.columns([2, 1.4, 1.4])
+        done, total = _progress(p, milestones)
+        c1.progress(done / total if total else 0.0,
+                    text=f"{done}/{total} milestones")
+        c2.caption(f"🎯 {str(p.get('target_date') or '—')[:10]}")
+        gh = p.get("github_url")
+        (c3.markdown(f"[🔗 GitHub]({gh})") if gh else c3.caption("no repo link"))
+        if p.get("blockers"):
+            kit.notice("warning", f"Blocker: {p['blockers']}")
+        d1, d2, _ = st.columns([1, 1, 4])
+        d1.button("✎ Edit", key=f"pe_{p['id']}")
+        d2.button("🗑", key=f"pd_{p['id']}")
+        _detail_expander(p, milestones)
+        st.write("")
 
 
 def render() -> None:
-    st.header("📁 Projects")
-    st.caption("Ship work publicly: milestones track progress, blockers stay visible.")
+    projects = source.load_projects()
+    milestones = source.load_milestones()
+    tasks = source.load_tasks(active_only=False)
+    kit.page_header("📁 Projects", "Milestones, deadlines, blockers — one board per project",
+                    date_context=f"{len(projects)} projects")
+    kit.page_banner_demo()
 
-    client, err = _sup()
-    if err:
-        st.warning(err)
-        return
-    from db import queries
-    uid = queries.current_user_id(client)
+    view = st.segmented_control("View", ["Cards", "Kanban"], default="Cards",
+                                label_visibility="collapsed") or "Cards"
 
-    with st.form("addproj", border=True, clear_on_submit=True):
-        st.subheader("➕ New project")
-        name = st.text_input("Name", placeholder="e.g. Portfolio dashboard app")
-        desc = st.text_area("Short description")
-        c1, c2 = st.columns(2)
-        gh = c1.text_input("GitHub URL (optional)", placeholder="https://github.com/...")
-        tgt = c2.date_input("Target date (optional)", value=None)
-        if st.form_submit_button("Create project", type="primary") and name.strip():
-            crud.insert_row(client, "projects",
-                            {"name": name.strip(), "description": desc.strip() or None,
-                             "github_url": gh.strip() or None,
-                             "start_date": date.today(),
-                             "target_date": tgt},
-                            user_id=uid)
-            st.rerun()
+    if view == "Cards":
+        for p in projects:
+            _project_card(p, milestones)
+    else:
+        cols = st.columns(4)
+        for col, status in zip(cols, KANBAN_COLS):
+            with col:
+                st.markdown(
+                    f"<div class='p-kanban-col-header' style='font-weight:700;margin-bottom:.3rem'>{KANBAN_LABEL[status]} · "
+                    f"{sum(1 for p in projects if p.get('status') == status)}</div>",
+                    unsafe_allow_html=True)
+                for p in [x for x in projects if x.get("status") == status]:
+                    done_m, total_m = _progress(p, milestones)
+                    target = str(p.get("target_date") or "—")[:10]
+                    late = target not in ("—",) and target < date.today().isoformat() \
+                        and status not in ("done", "review")
+                    st.markdown(f"""
+                      <div class="p-card" style="padding:.65rem .8rem;margin-bottom:.5rem">
+                        <b style="font-size:.9rem">{p['name']}</b><br>
+                        <span style="font-size:.75rem;color:{TOKENS['muted']}">
+                        {done_m}/{total_m} milestones · 🎯 {target}
+                        {' · ⛔' if late else ''}</span>
+                      </div>""", unsafe_allow_html=True)
+                    with st.popover("⋯", use_container_width=True, key=f"kb_{p['id']}"):
+                        _detail_expander(p, milestones)
 
+    # add project
     st.divider()
-    projects = crud.list_rows(client, "projects", order_by="start_date", desc=False)
-    if not projects:
-        empty_state("No projects yet. Every career-worthy app starts as a blank form.", "📁")
-    for p in projects:
-        _project_card(client, uid, p)
+    with st.form("proj_add", border=True):
+        st.markdown("##### ➕ Add project")
+        name = st.text_input("Name", placeholder="e.g. Portfolio site v2")
+        desc = st.text_area("Description", height=60)
+        c1, c2 = st.columns(2)
+        gh = c1.text_input("GitHub URL", placeholder="https://github.com/…")
+        tgt = c2.date_input("Target date", value=None)
+        if st.form_submit_button("Create project", type="primary") and name.strip():
+            if source.mode() != "demo":
+                st.info("DB-backed creation is wired via db/queries for tasks; "
+                        "project CRUD hooks to live tables next milestone.")
+            else:
+                from data.demo_data import data as dd
+                dd()["projects"].append({
+                    "id": f"demo-p{len(dd()['projects'])+1}", "user_id": "demo",
+                    "name": name.strip(), "description": desc.strip() or None,
+                    "github_url": gh.strip() or None,
+                    "start_date": date.today().isoformat(),
+                    "target_date": tgt.isoformat() if tgt else None,
+                    "status": "pending", "blockers": None, "notes": ""})
+                st.toast("Project created (demo)", icon="📁")
+                st.rerun()

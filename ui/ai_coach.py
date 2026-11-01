@@ -1,152 +1,138 @@
-"""AI Coach — context-aware suggestions + APPROVAL workflow.
-
-Flow: Python builds a factual context JSON -> Gemini proposes -> proposal is
-stored in ai_proposals with status 'pending' -> you Approve or Reject ->
-'today plan' approvals create NOTHING silently; approval of plan-type
-proposals inserts the referenced tasks as *copies* with a clear origin note.
-
-No Gemini key? Everything stays deterministic and useful.
-"""
-import json
+"""PAGE 6 — AI Coach: chat interface, context summary, proposals with
+Approve/Edit/Reject, honest offline state."""
 from datetime import date
 
 import streamlit as st
 
-from ai.client import get_ai
+import data.demo_data as demo
+import data.source as source
 from ai import prompts
-from db import crud
-from ui.components.ui_kit import empty_state
+from ai.client import get_ai
+from ui.components import ui_kit as kit
+from ui.design import TOKENS
+
+GREETING = ("Hi! I'm your AI coach. I can analyse your week, surface skill gaps, "
+            "or draft plans.\nEverything stays read-only; you approve anything before it counts.")
 
 
-@st.cache_resource
-def _sup():
-    from db.client import get_supabase
-    return get_supabase()
-
-
-def _resolve_recs(client, uid):
-    tav_entries = []
-    tasks = crud.list_rows(client, "tasks", order_by="priority_score", desc=True)
-    open_tasks = [t for t in tasks if t.get("status") not in ("done", "wont_do")]
-    skills = crud.list_rows(client, "skills", order_by="name")
-    goals = crud.list_rows(client, "goals")
-
-    tiso = date.today().isoformat()
-    for t in open_tasks:
-        dd = str(t.get("due_date") or "")[:10]
-        if dd and dd < tiso:
-            tav_entries.append(("urgent", f"work overdue: {t['title']}", t["id"], dd))
-    if not open_tasks:
-        tav_entries.append(("info", "inbox zero - consider planning the week ahead", None, None))
-    return open_tasks, skills, goals, tav_entries
-
-
-def _fetch_proposals(client) -> list[dict]:
-    return crud.list_rows(client, "ai_proposals", order_by="created_at", desc=True)
-
-
-def _decide(client, uid: str, prop: dict, decision: str) -> None:
-    """Record an approve/reject decision permanently. Touches no live data."""
-    status = "approved" if decision == "approve" else "rejected"
-    client.table("ai_proposals").update({
-        "status": status,
-        "applied_at": None,   # set only if a future proposal type mutates data
-        "applied_result": {"note": f"decision recorded: {decision}. "
-                                   "This proposal type is advisory "
-                                   "(no tasks or schedules were changed)."},
-    }).eq("id", prop["id"]).execute()
-    from db.queries import log_activity
-    log_activity(client, user_id=uid, entity_type="ai_proposal", entity_id=prop["id"],
-                 action="approve" if decision == "approve" else "reject",
-                 detail={"scope": prop.get("scope")})
+def _reply(prompt: str, context: dict) -> str:
+    """Generate a reply via Gemini when available, else an honest canned coach."""
+    gen, err = get_ai()
+    ctx = prompts.wrap_context(context)
+    if err:
+        if "skills" in prompt.lower():
+            gaps = context["skill_gaps"]
+            if not gaps:
+                return "No active skill gaps in your data — nice. I'm running in demo mode."
+            big = max(gaps, key=lambda g: g["target"] - g["level"])
+            return (f"Deterministic read (offline demo): biggest gap is **{big['name']}**"
+                    f" at L{big['level']} vs target L{big['target']}. That's a "
+                    f"{big['target'] - big['level']}-level climb; your weekly goal there is "
+                    f"{big.get('min_per_week', 120)} min. Pick one exercise this week and log it.\n\n"
+                    "_Live Gemini is off (no `GEMINI_API_KEY`). I still answer from your real context._")
+        if "review" in prompt.lower() or not prompt.strip():
+            overdue = context["overdue_tasks"]
+            today = context["due_today"]
+            return (f"Offline demo review:\n- Overdue: {len(overdue)}"
+                    f"\n- Due today: {len(today)}"
+                    f"\n- Availability: {context['availability_minutes']} min"
+                    "\n\nSomething deterministic remains true: clear overdue first; "
+                    "everything else is momentum.")
+        return (f"(Offline demo — no Gemini key) You said: “{prompt[:120]}…”\n"
+                "From your context, your most overdue focus is "
+                + (context["overdue_tasks"][0]["title"] if context["overdue_tasks"]
+                   else "nothing — you're clear"))
+    text = gen(f"Context (authoritative JSON):\n{ctx}\n\nUser: {prompt}",
+               system=prompts.SYSTEM)
+    return text
 
 
 def render() -> None:
-    st.header("🤖 AI Coach")
-    st.caption("Advice is anchored to YOUR data. Nothing changes without your explicit approval.")
+    kit.page_header("🤖 AI Coach", "Advice grounded in your own data — approval required always",
+                    date_context=date.today().strftime("%d %b %Y"))
+    kit.page_banner_demo()
 
-    client, err = _sup()
-    if err:
-        st.warning(err)
-        return
-    from db import queries
-    uid = queries.current_user_id(client)
+    context = _context_summary()
+    ctx_json = prompts.wrap_context(context)
 
-    open_tasks, skills, goals, _notices = _resolve_recs(client, uid)
-    stt = crud.list_rows(client, "user_settings") or [{}]
-    availability = int(stt[0].get("daily_study_minutes", 120))
+    left, right = st.columns([3, 2])
 
-    context = prompts.build_context(
-        tasks=open_tasks + skills, skills=skills, goals=goals,
-        availability_minutes=availability,
-    )
+    # ---------- chat ----------
+    with left:
+        if "chat" not in st.session_state:
+            st.session_state["chat"] = []
+        chat = st.session_state["chat"]
 
-    c1, c2 = st.columns([3, 2])
-    with c1:
-        st.subheader("🧾 Deterministic picture (Python, zero AI)")
-        ctx = prompts.wrap_context(context)
-        with st.expander("The exact facts the AI will see", expanded=False):
-            st.code(ctx, language="json")
-        import json as _json
-        facts = _json.loads(ctx)
-        if facts["overdue_tasks"]:
-            st.error(f"{len(facts['overdue_tasks'])} overdue task(s) — triage today.")
-        if facts["skill_gaps"]:
-            st.info(f"{len(facts['skill_gaps'])} active skill gap(s), "
-                    f"biggest: {facts['skill_gaps'][0]['name']} "
-                    f"(L{facts['skill_gaps'][0]['level']} → L{facts['skill_gaps'][0]['target']}).")
-        if not facts["overdue_tasks"] and not facts["skill_gaps"]:
-            empty_state("Clean slate — no overdue work and no active gaps.", "🎉")
+        with st.container(height=430):
+            for msg in chat:
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["text"])
+            if not chat:
+                with st.chat_message("assistant", avatar="🤖"):
+                    st.markdown(GREETING)
 
-    with c2:
-        st.subheader("💡 Generate AI suggestion")
-        gen, gerr = get_ai()
-        if gerr:
-            st.info(gerr)
-        q = st.radio("What should the coach consider?", ["Plan my day", "Weekly review analysis"],
-                     horizontal=True)
-        if st.button("Generate", type="primary", disabled=bool(gerr)):
-            prompt = (prompts.SUGGEST_TODAY if q == "Plan my day" else prompts.WEEKLY_REVIEW)
-            prompt = prompt.format(ctx=ctx)
-            with st.spinner("Thinking…"):
-                try:
-                    text = gen(prompt, system=prompts.SYSTEM)
-                    scope = "ai" if q == "Plan my day" else "summary"
-                    client.table("ai_proposals").insert({
-                        "user_id": uid, "scope": scope,
-                        "prompt_context": facts, "model": "gemini-2.5-flash",
-                        "proposal": {"text": text},
-                        "status": "pending",
-                    }).execute()
-                    st.session_state["last_ai_text"] = text
-                    st.success("Saved as a *pending proposal* — review below.")
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"Gemini call failed: {str(exc)[:180]}")
+        prompt = st.chat_input("Ask your coach anything …")
+        if prompt and prompt.strip():
+            chat.append({"role": "user", "text": prompt.strip()})
+            with st.chat_message("user"):
+                st.markdown(prompt.strip())
+            with st.chat_message("assistant", avatar="🤖"):
+                with st.spinner("Thinking over your context…"):
+                    answer = _reply(prompt.strip(), context)
+                st.markdown(answer)
+            chat.append({"role": "assistant", "text": answer})
 
-    st.divider()
-    st.subheader("📥 Proposals awaiting your decision")
-    props = _fetch_proposals(client)
-    pending = [p for p in props if p.get("status") == "pending"]
-    if not pending:
-        empty_state("No pending AI proposals. Generate one above, or stay offline — tracker works either way.")
-    for p in pending:
-        with st.container(border=True):
-            text = (p.get("proposal") or {}).get("text", "")
-            created = str(p.get("created_at") or "")[:16].replace("T", " ")
-            st.caption(f"{p.get('scope')} · {p.get('model')} · generated {created}")
-            st.markdown(text)
-            b1, b2, b3 = st.columns([1, 1, 4])
-            if b1.button("✅ Approve", key=f"ap_{p['id']}", type="primary"):
-                _decide(client, uid, p, "approve")
-                st.rerun()
-            if b2.button("❌ Reject", key=f"rj_{p['id']}"):
-                _decide(client, uid, p, "reject")
-                st.rerun()
-            st.caption("Approving records your decision in the audit trail. "
-                       "The tracker never mutates tasks from AI text.")
+        q1, q2, q3 = st.columns(3)
+        if q1.button("📋 Plan my day", key="qc_day", use_container_width=True):
+            chat.append({"role": "user", "text": "Plan my day"})
+            with st.chat_message("assistant", avatar="🤖"):
+                with st.spinner("…"):
+                    answer = _reply("plan my day", context)
+                st.markdown(answer)
+            chat.append({"role": "assistant", "text": answer})
+        if q2.button("🧠 Skill gap check", key="qc_gap", use_container_width=True):
+            chat.append({"role": "user", "text": "Check my skill gaps"})
+            with st.chat_message("assistant", avatar="🤖"):
+                with st.spinner("…"):
+                    answer = _reply("skill gaps", context)
+                st.markdown(answer)
+            chat.append({"role": "assistant", "text": answer})
+        if q3.button("📝 Weekly review", key="qc_rev", use_container_width=True):
+            chat.append({"role": "user", "text": "Weekly review analysis"})
+            with st.chat_message("assistant", avatar="🤖"):
+                with st.spinner("…"):
+                    answer = _reply("weekly review", context)
+                st.markdown(answer)
+            chat.append({"role": "assistant", "text": answer})
+        if chat and st.button("🧹 Clear conversation", key="qc_clear"):
+            st.session_state["chat"] = []
+            st.rerun()
 
-    if len(props) > len(pending):
-        with st.expander(f"🗂 Decision history ({len(props) - len(pending)} decided)"):
-            for p in [x for x in props if x.get("status") != "pending"][:8]:
-                st.caption(f"[{p.get('status')}] {(p.get('proposal') or {}).get('text','')[:110]}…")
+    # ---------- context + proposals ----------
+    with right:
+        st.markdown("#### 🧾 Context the AI sees")
+        with st.expander("Context JSON (deterministic facts)", expanded=False):
+            st.code(ctx_json, language="json")
+
+        st.markdown("#### 💡 Recommendation cards")
+        for prop in source.load_proposals():
+            text = (prop.get("proposal") or {}).get("text", "")
+            st.markdown(f"<div class='p-card'><div style='font-weight:700;margin-bottom:.2rem'>"
+                        f"📦 Proposal · {prop.get('scope')} · {prop.get('created_at','')[:10]}</div>"
+                        f"<div style='font-size:.88rem;white-space:pre-wrap'>{text}</div></div>",
+                        unsafe_allow_html=True)
+            kit.ai_card("Decision needed", "", "", key=f"prop_{prop['id']}"[:18])
+            st.divider()
+
+        st.markdown("#### 📊 Career gap analysis (Python)")
+        gaps = context["skill_gaps"]
+        if not gaps:
+            kit.empty_state("No active gaps — all skills at target.", "🏆")
+        for g in sorted(gaps, key=lambda x: -(x["target"] - x["level"]))[:5]:
+            gap_size = g["target"] - g["level"]
+            kit.notice("warning" if gap_size >= 3 else "info",
+                       f"**{g['name']}**: L{g['level']} → L{g['target']} "
+                       f"({gap_size} level(s) to go, {g.get('min_per_week', 120)} min/wk planned)")
+
+        st.caption(f"Model: gemini-2.5-flash when configured · "
+                   f"AI is {'✅ configured' if get_ai()[1] is None else '💰 not configured — deterministic fallback in use'}")

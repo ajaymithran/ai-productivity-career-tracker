@@ -1,228 +1,140 @@
-"""Daily Planner — task CRUD against live Supabase.
-
-Data path: form -> queries.add_task -> RLS checks session -> row saved
-(+ activity_logs audit row). Python computes priority; no AI anywhere here.
-"""
+"""PAGE 2 — Daily Planner: date selector, capacity, filters, task table,
+add/edit, AI schedule proposal with explicit activation, overload warnings."""
 from datetime import date, timedelta
 
 import streamlit as st
 
-from db import crud
-from db import queries
-from db.client import get_supabase
+import data.source as source
+from core.scheduler import select_for_today
+from ui.components import ui_kit as kit
+from ui.design import TOKENS
 
 
-@st.cache_resource
-def _sup():
-    """Cache the authenticated client for the whole browser session."""
-    return get_supabase()
-
-
-def _status_badge(status: str) -> str:
-    return {"todo": "◻️ Todo", "in_progress": "🔨 In progress",
-            "done": "✅ Done", "wont_do": "🙈 Won't do"}.get(status, status)
-
-
-def _due_note(due_date: str | None) -> str:
-    if not due_date:
-        return ""
-    d = date.fromisoformat(str(due_date)[:10])
-    days_left = (d - date.today()).days
-    if days_left < 0:
-        return f' :red[OVERDUE {-days_left}d]'
-    if days_left == 0:
-        return " :orange[TODAY]"
-    if days_left <= 3:
-        return f" :yellow[{days_left}d left]"
-    return f" *( {days_left}d )*"
-
-
-def _add_task_form(client) -> None:
-    with st.form("add_task", border=True):
-        st.subheader("➕ New task")
-        title = st.text_input("Title", placeholder="e.g. Finish SQL joins module")
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            band = st.select_slider("Priority band", ["low", "medium", "high"], "medium")
-        with c2:
-            impact = st.slider("Impact", 1, 5, 3, help="How much does completing this matter?")
-        with c3:
-            effort = st.slider("Effort level", 1, 5, 3, help="5 = heavy grind")
-        c4, c5 = st.columns(2)
-        with c4:
-            est = st.number_input("Estimated minutes", 5, 600, 30, 5)
-        with c5:
-            due = st.date_input("Due date", value=None, min_value=date.today() - timedelta(days=365))
-        notes = st.text_area("Notes (optional)")
-
-        if st.form_submit_button("Add task", type="primary", use_container_width=True):
-            try:
-                uid = queries.current_user_id(client)
-                task = queries.add_task(
-                    client, title=title, user_id=uid, notes=notes,
-                    priority_band=band, impact=impact, effort=effort,
-                    estimated_minutes=int(est), due_date=due,
-                )
-                st.success(f"Task added — priority {task['priority_score']} (Python-computed, not AI).")
-                st.rerun()
-            except Exception as exc:
-                st.error(f"Could not add task: {str(exc)[:200]}")
-
-
-def _task_row(client, uid: str, task: dict) -> None:
-    """One task rendered as a compact interactive row."""
-    cols = st.columns([0.5, 5.0, 1.1, 1.1, 1.1])
-    with cols[0]:
-        st.markdown(f"### {int(task['priority_score'])}")
-    with cols[1]:
-        st.markdown(
-            f"**{task['title']}**{_due_note(task.get('due_date'))}<br>"
-            f"<sub>{task['priority_band']} · impact {task['impact']} · effort "
-            f"{task['effort']} · {task['estimated_minutes']} min · {_status_badge(task['status'])}</sub>",
-            unsafe_allow_html=True,
-        )
-    with cols[2]:
-        if task["status"] != "done" and st.button("✓", key=f"done_{task['id']}",
-                                                  help="Mark done", use_container_width=True):
-            queries.set_task_status(client, task=task, status="done", user_id=uid)
-            st.rerun()
-    with cols[3]:
-        edit_key = f"edit_{task['id']}"
-        with st.popover("✎", use_container_width=True):
-            new_title = st.text_input("Title", value=task["title"], key=f"t_{task['id']}")
-            c1, c2 = st.columns(2)
-            with c1:
-                new_est = st.number_input("Minutes", 5, 600, task["estimated_minutes"],
-                                          key=f"e_{task['id']}")
-            with c2:
-                new_band = st.select_slider("Band", ["low", "medium", "high"],
-                                            task["priority_band"], key=f"b_{task['id']}")
-            new_due = st.date_input("Due date", key=f"d_{task['id']}",
-                                    value=date.fromisoformat(str(task["due_date"])[:10])
-                                    if task.get("due_date") else None)
-            if st.button("Save changes", type="primary", key=f"s_{task['id']}"):
-                changes = {"title": new_title.strip() or task["title"],
-                           "estimated_minutes": int(new_est),
-                           "priority_band": new_band,
-                           "due_date": new_due}
-                queries.update_task_fields(client, task=task, changes=changes, user_id=uid)
-                st.rerun()
-    with cols[4]:
-        with st.popover("🗑", use_container_width=True):
-            st.write(f"Delete **{task['title']}** permanently?")
-            if st.button("Yes, delete", key=f"delyes_{task['id']}"):
-                queries.delete_task(client, task=task, user_id=uid)
-                st.rerun()
-
-
-def _group_tasks(client, uid: str, label: str, tasks: list[dict]) -> None:
-    st.subheader(f"{label} ({len(tasks)})")
+def _group(label: str, tasks: list[dict], key: str) -> None:
+    st.markdown(f"##### {label} · {len(tasks)}")
     if not tasks:
-        st.caption("Nothing here — add a task above or enjoy the quiet.")
+        kit.empty_state("Nothing in this bucket.", "🫙")
         return
-    for task in tasks:
-        _task_row(client, uid, task)
-
-
-# --------------------------------------------------------------------------
-# Time allocation: build today's plan respecting availability (Python decides)
-# --------------------------------------------------------------------------
-def _plan_section(client, uid: str) -> None:
-    st.divider()
-    st.subheader("🧩 Allocate today's time")
-    settings_rows = crud.list_rows(client, "user_settings")
-    availability = int(settings_rows[0].get("daily_study_minutes", 120)
-                       if settings_rows else 120)
-
-    existing = crud.list_rows(client, "daily_plans",
-                              filters={"plan_date": date.today().isoformat()})
-    if existing:
-        plan = existing[0]
-        items = crud.list_rows(client, "daily_plan_items",
-                               filters={"plan_id": plan["id"]}, order_by="position")
-        used = sum(int(i["minutes_allocated"]) for i in items)
-        st.info(f"Plan for today exists — {used}/{availability} min allocated "
-                f"({plan['status']})")
-        for i in items:
-            task_title = str(i.get("notes") or "Practice item")
-            c1, c2 = st.columns([5, 1])
-            st.markdown(f"- {task_title} — {i['minutes_allocated']} min")
-            if c2.button("✕", key=f"rmi_{i['id']}", help="Remove from plan"):
-                crud.delete_row(client, "daily_plan_items", i["id"], user_id=uid)
-                st.rerun()
-        if plan["status"] in ("draft", "active") and st.button("Mark plan COMPLETED",
-                                                               key="done_plan"):
-            client.table("daily_plans").update({"status": "completed"})\
-                  .eq("id", plan["id"]).execute()
+    for t in tasks:
+        kit.task_row(t, key_suffix=key)
+        if kit.confirm_delete(t["id"], t["title"]):
+            source.remove_task(t)
             st.rerun()
-        return
-
-    tasks = queries.fetch_open_tasks(client)
-    if not tasks:
-        st.caption("No open tasks to allocate.")
-        return
-
-    labels = {t["id"]: f"{t['title']} ({t['estimated_minutes']} min)"
-              for t in tasks}
-    picked = st.multiselect("Choose tasks for today (overdue first)",
-                            list(labels.keys()),
-                            format_func=lambda i: labels[i],
-                            default=[t["id"] for t in tasks
-                                     if str(t.get("due_date") or "")[:10]
-                                     <= date.today().isoformat()][:5])
-    chosen_minutes = sum(int(t["estimated_minutes"]) for t in tasks if t["id"] in picked)
-    over = chosen_minutes > availability
-    st.metric("Allocated", f"{chosen_minutes} / {availability} min",
-              delta=f"{'+' if over else ''}{chosen_minutes - availability} vs availability",
-              delta_color="inverse" if over else "off")
-    if over:
-        st.warning("Python validation: this exceeds today's availability. "
-                   "Fix by unloading low-priority items before saving.")
-
-    if st.button("💾 Save today's plan", type="primary", disabled=over) and picked:
-        plan = client.table("daily_plans").insert({
-            "user_id": uid, "plan_date": date.today().isoformat(),
-            "availability_minutes": availability, "status": "active",
-        }).execute().data[0]
-        from db.queries import log_activity
-        log_activity(client, user_id=uid, entity_type="plan", entity_id=plan["id"],
-                     action="create", detail={"items": len(picked),
-                                              "minutes": chosen_minutes})
-        for pos, tid in enumerate(picked, 1):
-            t = next(t for t in tasks if t["id"] == tid)
-            crud.insert_row(client, "daily_plan_items",
-                            {"plan_id": plan["id"], "task_id": tid,
-                             "minutes_allocated": t["estimated_minutes"],
-                             "position": pos,
-                             "notes": t["title"]}, user_id=uid)
-        st.rerun()
 
 
 def render() -> None:
-    st.header("🗓️ Daily Planner")
-    st.caption("Create, order and finish today's work. Priority is computed "
-               "deterministically by Python — same inputs, same score, always.")
+    settings = source.load_settings()
+    tasks = source.load_tasks(active_only=True)
+    kit.page_header("🗓 Daily Planner",
+                    "Plan the day, respect capacity, finish what matters",
+                    primary_action=("＋ Add task", "plan_add"),
+                    date_context=date.today().strftime("%d %b"))
+    if kit.header_action_pressed("plan_add"):
+        st.session_state["show_plan_form"] = not st.session_state.get("show_plan_form", False)
+    kit.page_banner_demo()
 
-    client, err = _sup()
-    if err:
-        st.warning(err)
+    # date context + capacity
+    plan_date = st.date_input("Planning date", date.today(),
+                              help="Tasks above filter to this date; capacity from Settings.")
+    availability = int(settings.get("daily_study_minutes", 120))
+    st.markdown(f"""
+    <div class="p-card">
+      <b>Capacity today:</b> {availability} min
+      &nbsp;·&nbsp; window {settings.get('study_start_time','06:30')}–{settings.get('study_end_time','22:00')}
+      &nbsp;·&nbsp; <span style="color:{TOKENS['muted']}">edit in Settings</span>
+    </div>""", unsafe_allow_html=True)
+
+    if st.session_state.get("show_plan_form"):
+        with st.container():
+            kit.add_task_form("plan", default_due=plan_date)
+        st.divider()
+
+    # filters
+    st.markdown("##### 📋 Task list")
+    c1, c2, c3 = st.columns([1.2, 1.2, 2.6])
+    with c1:
+        f_status = st.selectbox("Status", ["all", "overdue", "due today", "no date",
+                                           "upcoming"], key="pf_s")
+    with c2:
+        f_pri = st.multiselect("Priority", ["high", "medium", "low"],
+                               default=["high", "medium", "low"], key="pf_p")
+    with c3:
+        f_text = st.text_input("Search", "", placeholder="filter by title…", key="pf_q")
+
+    tiso = plan_date.isoformat()
+    def match(t):
+        dd = str(t.get("due_date") or "")[:10]
+        if t.get("priority_band") not in f_pri:
+            return False
+        if f_text and f_text.lower() not in t["title"].lower():
+            return False
+        if f_status == "overdue":
+            return dd and dd < tiso
+        if f_status == "due today":
+            return dd == tiso
+        if f_status == "no date":
+            return not dd
+        if f_status == "upcoming":
+            return dd and dd > tiso
+        return True
+
+    filtered = [t for t in tasks if match(t)]
+    total_min = sum(int(t.get("estimated_minutes", 0)) for t in filtered)
+
+    st.markdown(f"""
+    <div style="color:{TOKENS['muted']};font-size:.85rem;margin:.2rem 0 .4rem">
+      {len(filtered)} task(s) · {total_min} min scheduled
+      {' · <b style="color:' + TOKENS['danger'] + '">⚠ exceeds capacity!</b>' if total_min > availability else ''}
+    </div>""", unsafe_allow_html=True)
+    if not filtered:
+        kit.empty_state("No tasks match these filters.", "🔍")
         return
 
-    _add_task_form(client)
+    _group("⚡ Overdue", [t for t in filtered if t.get("due_date")
+                          and str(t["due_date"])[:10] < tiso], "od")
+    _group("☀️ Due this date", [t for t in filtered if str(t.get("due_date") or '')[:10] == tiso], "td")
+    _group("📅 Upcoming", [t for t in filtered if t.get("due_date")
+                           and str(t["due_date"])[:10] > tiso], "up")
+    _group("🗂 No date", [t for t in filtered if not t.get("due_date")], "nd")
+
+    # ---- AI proposed schedule (needs explicit activation) ----
     st.divider()
+    st.markdown("##### 🤖 Proposed AI schedule (pending — activate only if you approve)")
+    proposal = select_for_today(filtered, availability)
+    planned = sum(int(t.get("estimated_minutes", 0)) for t in proposal)
+    st.markdown(
+        f"<div class='p-card'><b>{len(proposal)} block(s), {planned}/{availability} min</b>"
+        f"{' · <b style=\"color:' + TOKENS['danger'] + '\">overload</b>' if planned > availability else ''}"
+        "<br>" + "<br>".join(
+            f"⏱ {t['title']} — {t['estimated_minutes']} min" for t in proposal) +
+        "</div>", unsafe_allow_html=True)
+    st.caption("💡 Reason: overdue first, then priority_score greedy-fill. "
+               "Nothing is scheduled until you activate.")
+    c1, c2, c3 = st.columns([1, 1, 4])
+    if c1.button("✅ Activate", key="plan_ap", type="primary",
+                 disabled=planned > availability):
+        st.session_state["active_schedule"] = [t["id"] for t in proposal]
+        st.success("Activated — schedule is live for today (recorded in session).")
+        st.toast("Schedule activated", icon="✅")
+    if c2.button("✏️ Edit", key="plan_ed"):
+        st.info("Edit a task with ✎ above, then re-propose. Actions, not autos.")
+    st.session_state.setdefault("active_schedule", [])
 
-    uid = queries.current_user_id(client)
-    tasks = queries.fetch_open_tasks(client)
-
-    today_iso = date.today().isoformat()
-    overdue = [t for t in tasks if t.get("due_date") and str(t["due_date"])[:10] < today_iso]
-    today_t = [t for t in tasks if t.get("due_date") and str(t["due_date"])[:10] == today_iso]
-    notime = [t for t in tasks if not t.get("due_date")]
-    upcoming = [t for t in tasks if t.get("due_date")
-                and str(t["due_date"])[:10] > today_iso]
-
-    _group_tasks(client, uid, "⏰ Overdue", overdue)
-    _group_tasks(client, uid, "☀️ Today", today_t)
-    _group_tasks(client, uid, "📅 Upcoming", upcoming)
-    _group_tasks(client, uid, "🗂 No date set", notime)
-    _plan_section(client, uid)
+    if st.session_state["active_schedule"]:
+        with st.expander("Active schedule (click ✕ on any row to drop it)",
+                         expanded=True):
+            remain = availability
+            for tid in st.session_state["active_schedule"]:
+                t = next((x for x in filtered if x["id"] == tid), None)
+                if not t:
+                    continue
+                cc1, cc2 = st.columns([6, .6])
+                cc1.markdown(f"- **{t['title']}** · {t['estimated_minutes']} min")
+                remain -= int(t["estimated_minutes"])
+                if cc2.button("✕", key=f"drop_{tid}"):
+                    st.session_state["active_schedule"].remove(tid)
+                    st.rerun()
+            st.progress(max(1 - remain / max(availability, 1), 0),
+                        text=f"{availability - remain}/{availability} min used")
+            if remain < 0:
+                st.error(f"Over capacity by {-remain} min — unload blocks above.")

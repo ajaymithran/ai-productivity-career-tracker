@@ -1,103 +1,179 @@
-"""Analytics — study hours, completion, consistency, trends (pandas + plotly)."""
+"""PAGE 7 — Analytics: date-range filters, trends, consistency, distribution."""
 from datetime import date, timedelta
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
-from db import crud
+import data.demo_data as demo
+import data.source as source
+from ui.components import ui_kit as kit
+from ui.design import TOKENS
+
+PRIMARY = TOKENS["primary"]
 
 
-@st.cache_resource
-def _sup():
-    from db.client import get_supabase
-    return get_supabase()
-
-
-def _tasks_frame(tasks: list[dict]) -> pd.DataFrame:
-    df = pd.DataFrame(tasks)
-    if df.empty:
-        return df
-    df["completed_at"] = pd.to_datetime(df.get("completed_at"), errors="coerce")
-    df["due_date"] = str(df.get("due_date") or "").str[:10].replace("", None)
-    df["day"] = df["completed_at"].dt.date.astype(str)
-    return df
+def _empty(msg: str, icon: str = "📭") -> None:
+    kit.empty_state(msg, icon)
 
 
 def render() -> None:
-    st.header("📊 Analytics")
-    st.caption("Facts only: every figure below is computed from your own rows.")
+    kit.page_header("📊 Analytics", "Facts from your own logged activity — nothing invented",
+                    date_context=date.today().strftime("%d %b %Y"))
+    kit.page_banner_demo()
 
-    client, err = _sup()
-    if err:
-        st.warning(err)
+    tasks_all = source.load_tasks(active_only=False)
+    projects = source.load_projects()
+    milestones = source.load_milestones()
+    skills = source.load_skills()
+    english = source.load_english_logs()
+
+    # ---- date filter ----
+    c1, c2, _ = st.columns([1.2, 1.2, 2.4])
+    default_from = date.today() - timedelta(days=29)
+    with c1:
+        d_from = st.date_input("From", default_from, key="an_from")
+    with c2:
+        d_to = st.date_input("To", date.today(), key="an_to")
+    if d_to < d_from:
+        st.error("The end date must be on or after the start date.")
         return
 
-    tasks = crud.list_rows(client, "tasks")
-    english = crud.list_rows(client, "english_logs", order_by="logged_on", desc=True)
-    df = _tasks_frame(tasks)
-
+    # tasks frame
+    df = pd.DataFrame(tasks_all)
     if df.empty:
-        st.info("No tasks yet — analytics light up as you use the Planner for a few days.")
+        _empty("No tasks have ever been logged — analytics appear as you use the Planner.",
+               "🌱")
         return
+    df["completed_at"] = pd.to_datetime(df.get("completed_at"), errors="coerce")
+    df["done_day"] = df["completed_at"].dt.date.astype('str').replace("NaT", None)
+    done = df[(df["status"] == "done") & df["completed_at"].notna()]
+    done_win = done[(done["done_day"] >= str(d_from)) & (done["done_day"] <= str(d_to))]
 
-    done = df[df["status"] == "done"].dropna(subset=["completed_at"])
-    done_train = done[done["day"] >= (date.today() - timedelta(days=29)).isoformat()]
+    c3, c4, c5 = st.columns(3)
+    c3.metric("Tasks completed", len(done_win), f"in {len(done_win['done_day'].unique()) if not done_win.empty else 0} day(s)")
+    c4.metric("Study minutes", int(done_win["estimated_minutes"].fillna(0).sum()) if not done_win.empty else 0)
+    c5.metric("Completion rate", f"{len(done) / max(len(df), 1) * 100:.0f}%",
+              "all-time")
 
-    # --- Consistency streak (consecutive days with >=1 completed task) ---
-    days_done = set(done_train["day"])
-    streak, cursor = 0, date.today()
-    while cursor.isoformat() in days_done or (streak == 0 and cursor == date.today()
-                                              and not days_done):
-        if cursor.isoformat() in days_done:
-            streak += 1
-            cursor -= timedelta(days=1)
-        else:
-            break
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Tasks completed (30d)", len(done_train))
-    c2.metric("Study minutes logged (30d)",
-              int(done_train["estimated_minutes"].fillna(0).sum()))
-    c3.metric("Current streak", f"{streak} day(s)")
-
-    st.divider()
     left, right = st.columns(2)
 
     with left:
-        if not done_train.empty:
-            daily = done_train.groupby("day")["estimated_minutes"].sum().reset_index()
-            fig = px.line(daily, x="day", y="estimated_minutes",
-                          title="Study minutes per day (from completed tasks)",
-                          markers=True)
-            fig.update_layout(margin=dict(t=40, b=10))
-            st.plotly_chart(fig, use_container_width=True)
+        st.markdown("##### ⏱ Study hours over time")
+        if done_win.empty:
+            _empty("Complete tasks in this window to see the study-hours line.")
         else:
-            st.caption("Complete tasks to build the study-minutes line.")
+            daily = done_win.groupby("done_day", as_index=False)["estimated_minutes"].sum()
+            daily["day_dt"] = pd.to_datetime(daily["done_day"])
+            all_days = pd.DataFrame({"day_dt": pd.date_range(d_from, d_to)})
+            daily = all_days.merge(daily, on="day_dt", how="left").fillna(0)
+            fig = go.Figure(go.Bar(x=daily["day_dt"], y=daily["estimated_minutes"],
+                                   marker_color=PRIMARY))
+            fig.update_layout(height=260, margin=dict(t=10), yaxis_title="min",
+                              plot_bgcolor="rgba(0,0,0,0)")
+            st.plotly_chart(fig, use_container_width=True)
 
-        band_counts = df[df["status"].isin(["todo", "in_progress"])]\
-            ["priority_band"].value_counts().reindex(["high", "medium", "low"]).fillna(0)
-        fig2 = px.bar(x=band_counts.index, y=band_counts.values,
-                      title="Open tasks by priority band",
-                      color=band_counts.index,
-                      color_discrete_map={"high": "#7F1D1D", "medium": "#1E3A5F", "low": "#4A7FB5"})
-        fig2.update_layout(showlegend=False, margin=dict(t=40, b=10))
-        st.plotly_chart(fig2, use_container_width=True)
+        st.markdown("##### 📉 Task completion trend")
+        if done_win.empty:
+            _empty("No completions in this window yet.")
+        else:
+            daily_c = done_win.groupby("done_day", as_index=False).size()
+            all_days = pd.DataFrame({"done_day": [str(d_) for d_ in
+                                                  pd.date_range(d_from, d_to)]})
+            daily_c = all_days.merge(daily_c, on="done_day", how="left").fillna(0)
+            fig2 = go.Figure(go.Scatter(x=daily_c["done_day"], y=daily_c["size"],
+                                        mode="lines+markers",
+                                        line=dict(color=TOKENS["success"])))
+            fig2.update_layout(height=240, margin=dict(t=10), yaxis_title="tasks")
+            st.plotly_chart(fig2, use_container_width=True)
+
+        st.markdown("##### ⚡ Priority distribution (open work)")
+        open_tasks = df[df["status"].isin(["todo", "in_progress"])]
+        if open_tasks.empty:
+            _empty("No open tasks — everything is done. 🎉", "🎉")
+        else:
+            counts = open_tasks["priority_band"].value_counts().reindex(
+                ["high", "medium", "low"]).fillna(0)
+            fig3 = go.Figure(go.Pie(labels=counts.index, values=counts.values,
+                                    hole=0.45,
+                                    marker=dict(colors=[TOKENS["danger"],
+                                                        TOKENS["warning"], PRIMARY])))
+            fig3.update_layout(height=250, margin=dict(t=10))
+            st.plotly_chart(fig3, use_container_width=True)
 
     with right:
-        status_counts = df["status"].value_counts()
-        fig3 = px.pie(names=status_counts.index, values=status_counts.values,
-                      title="All-time task status split", hole=0.45)
-        fig3.update_layout(margin=dict(t=40, b=10))
-        st.plotly_chart(fig3, use_container_width=True)
+        st.markdown("##### 🔥 Weekly consistency")
+        if source.mode() == "demo":
+            series = demo.demo_study_series(days=((d_to - d_from).days // 7) * 7 or 14)
+            s = pd.DataFrame(series)
+            s["week"] = pd.to_datetime(s["day"]).dt.strftime("week of %d %b")
+            wk = s.groupby("week", as_index=False).agg(days_active=("completed", lambda x: (x > 0).sum()),
+                                                       minutes=("minutes", "sum"))
+        else:
+            if done_win.empty:
+                wk = pd.DataFrame(columns=["week", "days_active", "minutes"])
+                wk.loc[0] = ["current week", 0, 0]
+            else:
+                s = done_win.copy()
+                s["week"] = pd.to_datetime(s["done_day"]).dt.strftime("week of %d %b")
+                wk = s.groupby("week", as_index=False).agg(**{
+                    "days_active": ("done_day", "nunique"),
+                    "minutes": ("estimated_minutes", "sum")})
+        fig4 = go.Figure(go.Bar(x=wk["week"], y=wk["days_active"],
+                                marker_color=TOKENS["warning"], name="active days"))
+        fig4.add_trace(go.Bar(x=wk["week"], y=wk["minutes"] / 60,
+                              marker_color=PRIMARY, name="hours"))
+        fig4.update_layout(barmode="group", height=260, margin=dict(t=10),
+                           plot_bgcolor="rgba(0,0,0,0)")
+        st.plotly_chart(fig4, use_container_width=True)
+
+        st.markdown("##### 📁 Project progress")
+        pm = []
+        for p in projects:
+            ms = [m for m in milestones if m.get("project_id") == p["id"]]
+            done_m = sum(1 for m in ms if m.get("status") == "done")
+            pm.append({"project": p["name"],
+                       "progress": int(done_m / max(len(ms), 1) * 100) if ms else 0,
+                       "status": p.get("status")})
+        if not pm:
+            _empty("No projects tracked yet.")
+        else:
+            pmdf = pd.DataFrame(pm)
+            fig5 = go.Figure(go.Bar(y=pmdf["project"], x=pmdf["progress"],
+                                    orientation="h", marker_color=PRIMARY,
+                                    text=[f"{v}%" for v in pmdf["progress"]]))
+            fig5.update_layout(height=200 + 30 * len(pm), margin=dict(t=10),
+                               xaxis=dict(range=[0, 100]), plot_bgcolor="rgba(0,0,0,0)")
+            st.plotly_chart(fig5, use_container_width=True)
+
+        st.markdown("##### 🧠 Skill development")
+        if not skills:
+            _empty("No skills tracked yet.")
+        else:
+            kdf = pd.DataFrame([{"name": s["name"],
+                                 "current": s.get("current_level", 1),
+                                 "target": s.get("target_level", 5)} for s in skills])
+            fig6 = go.Figure()
+            fig6.add_trace(go.Bar(name="Current", y=kdf["name"], x=kdf["current"],
+                                  orientation="h", marker_color=PRIMARY))
+            fig6.add_trace(go.Scatter(name="Target", y=kdf["name"], x=kdf["target"],
+                                      mode="markers",
+                                      marker=dict(symbol="line-ew-open", size=14,
+                                                  color=TOKENS["sidebar"])))
+            fig6.update_layout(height=280, margin=dict(t=10), barmode="overlay",
+                               plot_bgcolor="rgba(0,0,0,0)")
+            fig6.update_xaxes(range=[0, 5], dtick=1)
+            st.plotly_chart(fig6, use_container_width=True)
 
         if english:
             edf = pd.DataFrame(english)
             edf["logged_on"] = str(edf["logged_on"]).str[:10]
-            weekly = edf[edf["logged_on"] >= (date.today() - timedelta(days=7)).isoformat()]
-            fig4 = px.bar(weekly, x="practice_type", y="minutes",
-                          title="English minutes by type (this week)", color="practice_type")
-            fig4.update_layout(showlegend=False, margin=dict(t=40, b=10))
-            st.plotly_chart(fig4, use_container_width=True)
-        else:
-            st.caption("Log English practice to see the weekly split.")
+            st.markdown("##### 🗣 English minutes by type")
+            efig = px.bar(edf, x="practice_type", y="minutes",
+                          color="practice_type",
+                          color_discrete_sequence=[PRIMARY, TOKENS["success"],
+                                                   TOKENS["warning"], "#8B5CF6", "#EC4899"])
+            efig.update_layout(showlegend=False, height=240, margin=dict(t=10),
+                               plot_bgcolor="rgba(0,0,0,0)")
+            st.plotly_chart(efig, use_container_width=True)

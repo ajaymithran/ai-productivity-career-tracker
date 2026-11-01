@@ -1,143 +1,120 @@
-"""Career Roadmap — goals, job readiness, resume/portfolio progress."""
+"""PAGE 5 — Career Roadmap: goal overview, target role, milestone timeline,
+readiness categories with clear completed/active/pending distinction."""
 from datetime import date, timedelta
 
 import streamlit as st
 
-from db import crud
-from ui.components.ui_kit import empty_state, kpi_card, status_badge
+import data.demo_data as demo
+import data.source as source
+from ui.components import ui_kit as kit
+from ui.design import TOKENS
+
+MILESTONE_DOT = {"completed": TOKENS["success"], "active": TOKENS["primary"],
+                 "pending": "#CBD5E1"}
+
+READY_CATS = [
+    ("📄 Resume status", 0.45, "resume"),
+    ("🗂 Portfolio status", 0.35, "portfolio"),
+    ("🎤 Interview preparation", 0.20, "interview"),
+]
 
 
-@st.cache_resource
-def _sup():
-    from db.client import get_supabase
-    return get_supabase()
+def _goal_overview() -> None:
+    goals = source.load_goals()
+    ms = source.load_career_milestones()
+    with st.container():
+        st.markdown("<div class='p-card'>", unsafe_allow_html=True)
+        st.markdown("##### 🎯 Career goal overview")
+        for g in goals:
+            st.markdown(
+                f"<b>{g['title']}</b> {kit.status_badge(g.get('status'))} "
+                f"<span style='color:{TOKENS['muted']};font-size:.82rem'>"
+                f"· {g.get('horizon','')} · due {str(g.get('target_date') or '—')[:10]}</span>",
+                unsafe_allow_html=True)
+            st.progress((g.get("progress_pct", 0) or 0) / 100,
+                        text=f"{g.get('progress_pct', 0)}%")
+        st.markdown("</div>", unsafe_allow_html=True)
+    with st.container():
+        st.markdown("<div class='p-card' style='margin-top:.7rem'>", unsafe_allow_html=True)
+        st.markdown("##### 🛤 Roadmap timeline")
+        for m in ms:
+            dot = MILESTONE_DOT.get(m.get("status"), "#CBD5E1")
+            stale = {"completed": "✅", "active": "🔵", "pending": "⚪️"}.get(m.get("status"), "⚪️")
+            st.markdown(
+                f"<span class='p-timeline-dot' style='background:{dot}'></span> {stale} "
+                f"<b>{m['title']}</b> {kit.status_badge(m.get('status'))} "
+                f"<span style='color:{TOKENS['muted']};font-size:.8rem'>{str(m.get('when'))[:10]}</span>",
+                unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
 
 
-def _readiness_upsert(client, uid: str) -> dict:
-    """Ensure the 1:1 job_readiness row exists and return it."""
-    rows = crud.list_rows(client, "job_readiness")
-    return rows[0] if rows else {"user_id": uid, "resume_progress_pct": 0,
-                                 "portfolio_progress_pct": 0,
-                                 "readiness_score": 0, "applications_sent": 0,
-                                 "interviews": 0, "target_role": None, "notes": None}
+def _readiness() -> None:
+    ms = source.load_career_milestones()
+    completed = sum(1 for m in ms if m.get("status") == "completed")
+    pct = int(completed / max(len(ms), 1) * 100)
+    resume, portfolio, interview = pct + 10, max(pct - 5, 0), max(pct - 15, 0)
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        kit.kpi("Job readiness", f"{pct}%", "milestone-weighted", "primary")
+    with c2:
+        kit.kpi("📄 Resume status", f"{resume}%", "v2 drafting", "warning")
+    with c3:
+        kit.kpi("🗂 Portfolio status", f"{portfolio}%", "3 projects target", "primary")
+    with c4:
+        kit.kpi("🎤 Interview prep", f"{interview}%", "mocks pending", "danger")
+    st.caption("Readiness is deterministic: completed career milestones ÷ total. "
+               "Sample numbers are demo-labelled.")
+
+    # required-skills radar input
+    skills = source.load_skills()
+    relevant = [s for s in skills if s.get("category") in ("Data Analytics",
+                                                           "Data Science", "AI/ML")]
+    with st.expander("🧩 Required skills for the target role", expanded=False):
+        for s in relevant:
+            kit.status_badge({"Programming": "blue"}.get(s.get("category"), "gray"))
+            st.markdown(f"- **{s['name']}** — L{s.get('current_level', 1)} "
+                        f"→ L{s.get('target_level', 5)} "
+                        f"{'· gap' if s.get('target_level', 5) > s.get('current_level', 1) else '· ready'}")
 
 
 def render() -> None:
-    st.header("🧭 Career Roadmap")
-    st.caption("Where you want to go, and how close you already are.")
+    kit.page_header("🧭 Career Roadmap",
+                    "Where you're heading and how far along you are",
+                    date_context=date.today().strftime("%d %b %Y"))
+    kit.page_banner_demo()
 
-    client, err = _sup()
-    if err:
-        st.warning(err)
-        return
-    from db import queries
-    uid = queries.current_user_id(client)
-
-    jr = _readiness_upsert(client, uid)
-    score = int(0.45 * jr.get("resume_progress_pct", 0)
-                + 0.35 * jr.get("portfolio_progress_pct", 0)
-                + 0.20 * min(jr.get("applications_sent", 0) * 5, 100))
-    if score != jr.get("readiness_score"):
-        crud.update_row(client, "job_readiness", uid, {"readiness_score": score}, user_id=uid)
-
-    c1, c2, c3, c4 = st.columns(4)
-    kpi_card(c1, "Job readiness", f"{score}%", "resume+portfolio+apps")
-    kpi_card(c2, "Resume done", f"{jr.get('resume_progress_pct',0)}%", "polished & targeted")
-    kpi_card(c3, "Portfolio done", f"{jr.get('portfolio_progress_pct',0)}%", "public projects")
-    kpi_card(c4, "Applications", jr.get("applications_sent", 0),
-             f"{jr.get('interviews',0)} interview(s)")
+    c1, c2 = st.columns([3, 2])
+    with c1:
+        _goal_overview()
+    with c2:
+        st.markdown("<div class='p-card'>", unsafe_allow_html=True)
+        st.markdown("##### 🧾 Target package")
+        role = st.text_input("Target role", "Junior Data Analyst", key="tr_role")
+        package = st.text_input("Target package", "3–4.5 LPA to start", key="tr_pkg")
+        tdate = st.date_input("Target date", date.today() + timedelta(days=75),
+                              key="tr_date")
+        st.caption("These feed the AI Coach context (and stay local until DB wiring).")
+        st.markdown("</div>", unsafe_allow_html=True)
 
     st.divider()
-    left, right = st.columns([3, 2])
+    _readiness()
 
-    with left:
-        st.subheader("🎯 Goals")
-        with st.form("addgoal", border=True, clear_on_submit=True):
-            title = st.text_input("Goal", placeholder="e.g. Land a data analyst role")
-            c1, c2 = st.columns(2)
-            horizon = c1.select_slider("Horizon", ["short_term", "mid_term", "long_term"])
-            target = c2.date_input("Target date", value=None,
-                                   min_value=date.today())
-            if st.form_submit_button("Add goal", type="primary") and title.strip():
-                crud.insert_row(client, "goals",
-                                {"title": title.strip(), "horizon": horizon,
-                                 "target_date": target if target else None,
-                                 "status": "active", "progress_pct": 0}, user_id=uid)
-                st.rerun()
-
-        goals = crud.list_rows(client, "goals", order_by="target_date")
-        if not goals:
-            empty_state("No goals yet. Name the destination; the planner fills the road.", "🧭")
-        for g in goals:
-            with st.container(border=True):
-                c1, c2, c3 = st.columns([4, 1.8, 1.6])
-                c1.markdown(f"**{g['title']}** {status_badge(g['status'])}<br>"
-                            f"<sub>{g['horizon']} · due {str(g.get('target_date') or '—')[:10]}</sub>",
-                            unsafe_allow_html=True)
-                prog = c2.slider("Progress %", 0, 100, g.get("progress_pct", 0),
-                                 key=f"gp_{g['id']}")
-                if prog != g.get("progress_pct", 0):
-                    if c3.button("Save", key=f"gs_{g['id']}"):
-                        stat = "achieved" if prog == 100 and g["status"] == "active" else g["status"]
-                        crud.update_row(client, "goals", g["id"],
-                                        {"progress_pct": prog, "status": stat}, user_id=uid)
-                        st.rerun()
-                with c3.popover("✎", use_container_width=True):
-                    act = st.select_slider("Status", ["active", "paused", "achieved", "abandoned"],
-                                           g["status"], key=f"gact_{g['id']}")
-                    if st.button("Apply", key=f"gap_{g['id']}"):
-                        crud.update_row(client, "goals", g["id"], {"status": act}, user_id=uid)
-                        st.rerun()
-                    if st.button("🗑 Delete", key=f"gdel_{g['id']}"):
-                        crud.delete_row(client, "goals", g["id"], user_id=uid, label=g["title"])
-                        st.rerun()
-
-    with right:
-        st.subheader("📝 Weekly review")
-        monday = date.today() - timedelta(days=date.today().weekday())
-        reviews = crud.list_rows(client, "weekly_reviews", order_by="week_start_date", desc=True)
-        this = next((r for r in reviews if str(r["week_start_date"])[:10] == monday.isoformat()), None)
-        with st.form("weekly", border=True):
-            st.caption(f"Week of {monday.isoformat()}")
-            wins = st.text_area("Wins", (this or {}).get("wins") or "")
-            chal = st.text_area("Challenges", (this or {}).get("challenges") or "")
-            c1, c2, c3 = st.columns(3)
-            planned = c1.number_input("Planned min", 0, 10000, (this or {}).get("planned_minutes") or 0)
-            actual = c2.number_input("Actual min", 0, 10000, (this or {}).get("actual_minutes") or 0)
-            tdone = c3.number_input("Tasks done", 0, 500, (this or {}).get("tasks_done") or 0)
-            if st.form_submit_button("Save review", type="primary"):
-                payload = {"wins": wins or None, "challenges": chal or None,
-                           "planned_minutes": int(planned), "actual_minutes": int(actual),
-                           "tasks_done": int(tdone)}
-                if this:
-                    crud.update_row(client, "weekly_reviews", this["id"], payload, user_id=uid)
-                else:
-                    crud.insert_row(client, "weekly_reviews",
-                                    {**payload, "week_start_date": monday}, user_id=uid)
-                st.success("Review saved.")
-                st.rerun()
-        if reviews:
-            st.caption("Recent reviews")
-            for r in reviews[:4]:
-                st.markdown(f"- **{str(r['week_start_date'])[:10]}** — "
-                            f"{r.get('actual_minutes',0) or 0}/{r.get('planned_minutes',0) or 0} min, "
-                            f"{r.get('tasks_done',0) or 0} tasks")
-
-        st.subheader("📄 Job readiness")
-        with st.form("ready", border=True):
-            role = st.text_input("Target role", jr.get("target_role") or "",
-                                 placeholder="e.g. Junior Data Analyst")
-            a = st.slider("Resume progress %", 0, 100, jr.get("resume_progress_pct", 0))
-            b = st.slider("Portfolio progress %", 0, 100, jr.get("portfolio_progress_pct", 0))
-            apps = st.number_input("Applications sent", 0, 999,
-                                   jr.get("applications_sent", 0))
-            ints = st.number_input("Interviews so far", 0, 99, jr.get("interviews", 0))
-            note = st.text_area("Strategy notes", jr.get("notes") or "")
-            if st.form_submit_button("Save readiness", type="primary"):
-                crud.update_row(client, "job_readiness", uid,
-                                {"target_role": role or None, "resume_progress_pct": a,
-                                 "portfolio_progress_pct": b,
-                                 "applications_sent": int(apps),
-                                 "interviews": int(ints), "notes": note or None},
-                                user_id=uid)
+    if source.mode() != "demo":
+        st.info("Adding milestones across live DB lands with next wiring milestone; "
+                "sample interactions above already work offline.")
+    with st.form("cm_add", border=True):
+        st.markdown("##### ➕ Add career milestone")
+        title = st.text_input("Milestone")
+        status = st.select_slider("Status", ["completed", "active", "pending"])
+        when = st.date_input("When", value=None)
+        if st.form_submit_button("Add milestone", type="primary") and title.strip():
+            if source.mode() != "demo":
+                st.info("DB wiring pending — demo flow only.")
+            else:
+                from data.demo_data import data as dd
+                dd()["career_milestones"].append({
+                    "id": f"demo-cm{len(dd()['career_milestones'])+1}",
+                    "title": title.strip(), "status": status,
+                    "when": when.isoformat() if when else None})
+                st.toast("Added (demo)", icon="🧭")
                 st.rerun()
