@@ -32,6 +32,8 @@ class Settings:
 
     # --- App behaviour ---
     APP_NAME: str = "AI Productivity & Career Tracker"
+    # Daily boundary timezone (Cloud runs UTC; the user's day is IST).
+    TIMEZONE: str = os.getenv("TIMEZONE", "Asia/Kolkata")
 
     @classmethod
     def supabase_configured(cls) -> bool:

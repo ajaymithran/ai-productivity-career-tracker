@@ -10,6 +10,7 @@ import data.source as source
 from core.scheduler import deadline_notice_level, select_for_today
 from ui.components import ui_kit as kit
 from ui.design import TOKENS
+from src.utils.dates import today as today_local
 
 
 @st.cache_resource
@@ -25,7 +26,7 @@ def _ai_daily_card(tasks: list[dict], availability: int) -> None:
     if plan:
         body = "\n".join(
             f"{i}. {t['title']} — {t['estimated_minutes']} min "
-            f"({'overdue' if str(t.get('due_date') or '')[:10] < date.today().isoformat() else 'next'})"
+            f"({'overdue' if str(t.get('due_date') or '')[:10] < today_local().isoformat() else 'next'})"
             for i, t in enumerate(plan, 1))
         reason = (f"Python sorted overdue first, then highest priority_score; "
                   f"{used}/{availability} min fits your availability.")
@@ -53,7 +54,7 @@ def render() -> None:
     skills = source.load_skills()
     notifications = source.load_notifications()
 
-    today = date.today()
+    today = today_local()
     tiso = today.isoformat()
     kit.page_header(
         f"Good day, {profile.get('display_name','there')} 👋",

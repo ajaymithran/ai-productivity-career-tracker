@@ -8,6 +8,7 @@ import data.demo_data as demo
 import data.source as source
 from ui.components import ui_kit as kit
 from ui.design import TOKENS
+from src.utils.dates import today as today_local
 
 MILESTONE_DOT = {"completed": TOKENS["success"], "active": TOKENS["primary"],
                  "pending": "#CBD5E1"}
@@ -80,7 +81,7 @@ def _readiness() -> None:
 def render() -> None:
     kit.page_header("🧭 Career Roadmap",
                     "Where you're heading and how far along you are",
-                    date_context=date.today().strftime("%d %b %Y"))
+                    date_context=today_local().strftime("%d %b %Y"))
     kit.page_banner_demo()
 
     c1, c2 = st.columns([3, 2])
@@ -91,7 +92,7 @@ def render() -> None:
         st.markdown("##### 🧾 Target package")
         role = st.text_input("Target role", "Junior Data Analyst", key="tr_role")
         package = st.text_input("Target package", "3–4.5 LPA to start", key="tr_pkg")
-        tdate = st.date_input("Target date", date.today() + timedelta(days=75),
+        tdate = st.date_input("Target date", today_local() + timedelta(days=75),
                               key="tr_date")
         st.caption("These feed the AI Coach context (and stay local until DB wiring).")
         st.markdown("</div>", unsafe_allow_html=True)

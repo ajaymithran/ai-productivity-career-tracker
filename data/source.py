@@ -91,6 +91,10 @@ def load_tasks(active_only: bool = True) -> list[dict]:
         tasks = d["tasks"]
     tasks = [dict(t) for t in tasks]
     for t in tasks:
+        # one UI vocabulary everywhere: the store layer may say "completed"
+        # (local SQLite CHECK constraint) but live/demo/UI all use "done"
+        if t.get("status") == "completed":
+            t["status"] = "done"
         t.setdefault("estimated_minutes", 30)
         t.setdefault("priority_score", 0)
         t.setdefault("priority_band", "medium")
@@ -248,7 +252,7 @@ def toggle_task_done(task: dict) -> None:
         st.session_state.pop("tasks_cache", None)
     elif mode() == "local":
         from src.database import local_store as store
-        new = "todo" if task.get("status") == "completed" else "completed"
+        new = "todo" if task.get("status") in ("done", "completed") else "completed"
         store.set_status(task["id"], new)
     else:
         if task.get("status") == "done":

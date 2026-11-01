@@ -8,6 +8,7 @@ import data.source as source
 from core.scheduler import select_for_today
 from ui.components import ui_kit as kit
 from ui.design import TOKENS
+from src.utils.dates import today as today_local
 
 
 def _group(label: str, tasks: list[dict], key: str) -> None:
@@ -28,13 +29,13 @@ def render() -> None:
     kit.page_header("🗓 Daily Planner",
                     "Plan the day, respect capacity, finish what matters",
                     primary_action=("＋ Add task", "plan_add"),
-                    date_context=date.today().strftime("%d %b"))
+                    date_context=today_local().strftime("%d %b"))
     if kit.header_action_pressed("plan_add"):
         st.session_state["show_plan_form"] = not st.session_state.get("show_plan_form", False)
     kit.page_banner_demo()
 
     # date context + capacity
-    plan_date = st.date_input("Planning date", date.today(),
+    plan_date = st.date_input("Planning date", today_local(),
                               help="Tasks above filter to this date; capacity from Settings.")
     availability = int(settings.get("daily_study_minutes", 120))
     st.markdown(f"""

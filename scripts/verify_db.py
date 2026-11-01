@@ -47,19 +47,32 @@ def main() -> int:
         print(f"FAIL: {err}")
         return 1
 
+    leaked = []
     for table in TABLES:
         try:
             # select("*") but limited to 1 row; RLS decides if anything is visible
             res = client.table(table).select("*").limit(1).execute()
-            print(f"PASS  {table:<18} rows visible to anon: {len(res.data)} (expect 0 = RLS active)")
+            n = len(res.data)
+            if n == 0:
+                print(f"PASS  {table:<18} anon sees 0 rows (RLS active)")
+            else:
+                # SECURITY: anon must NEVER see rows on user-owned tables
+                leaked.append(table)
+                print(f"LEAK  {table:<18} anon sees {n} row(s) — RLS is NOT enforced for this table!")
         except Exception as exc:
             ok = False
             msg = str(exc).split("\n")[0]
             print(f"FAIL  {table:<18} {msg[:120]}")
 
     print()
+    if leaked:
+        print("SECURITY WARNING — RLS leaks detected on:",
+              ", ".join(leaked))
+        print("Fix: Supabase dashboard → SQL Editor → run scripts\\show_rls_policies.sql,")
+        print("then drop every policy that is not '<table>_owner_all' and re-run this check.")
+        return 2
     if ok:
-        print("ALL TABLES REACHABLE — RLS held. Task 4 verified.")
+        print("ALL TABLES REACHABLE — RLS held.")
         return 0
     print("Some tables failed — paste the full output back to me.")
     return 1

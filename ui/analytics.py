@@ -10,6 +10,7 @@ import data.demo_data as demo
 import data.source as source
 from ui.components import ui_kit as kit
 from ui.design import TOKENS
+from src.utils.dates import today as today_local
 
 PRIMARY = TOKENS["primary"]
 
@@ -20,7 +21,7 @@ def _empty(msg: str, icon: str = "📭") -> None:
 
 def render() -> None:
     kit.page_header("📊 Analytics", "Facts from your own logged activity — nothing invented",
-                    date_context=date.today().strftime("%d %b %Y"))
+                    date_context=today_local().strftime("%d %b %Y"))
     kit.page_banner_demo()
 
     tasks_all = source.load_tasks(active_only=False)
@@ -31,11 +32,11 @@ def render() -> None:
 
     # ---- date filter ----
     c1, c2, _ = st.columns([1.2, 1.2, 2.4])
-    default_from = date.today() - timedelta(days=29)
+    default_from = today_local() - timedelta(days=29)
     with c1:
         d_from = st.date_input("From", default_from, key="an_from")
     with c2:
-        d_to = st.date_input("To", date.today(), key="an_to")
+        d_to = st.date_input("To", today_local(), key="an_to")
     if d_to < d_from:
         st.error("The end date must be on or after the start date.")
         return
@@ -67,7 +68,12 @@ def render() -> None:
             daily = done_win.groupby("done_day", as_index=False)["estimated_minutes"].sum()
             daily["day_dt"] = pd.to_datetime(daily["done_day"])
             all_days = pd.DataFrame({"day_dt": pd.date_range(d_from, d_to)})
-            daily = all_days.merge(daily, on="day_dt", how="left").fillna(0)
+            daily = all_days.merge(daily, on="day_dt", how="left")
+            daily["estimated_minutes"] = daily.get("estimated_minutes", 0)
+            if daily["estimated_minutes"].dtype.kind in "iuUO":
+                daily["estimated_minutes"] = pd.to_numeric(
+                    daily["estimated_minutes"], errors="coerce")
+            daily["estimated_minutes"] = daily["estimated_minutes"].fillna(0.0)
             fig = go.Figure(go.Bar(x=daily["day_dt"], y=daily["estimated_minutes"],
                                    marker_color=PRIMARY))
             fig.update_layout(height=260, margin=dict(t=10), yaxis_title="min",
@@ -81,7 +87,8 @@ def render() -> None:
             daily_c = done_win.groupby("done_day", as_index=False).size()
             all_days = pd.DataFrame({"done_day": [str(d_) for d_ in
                                                   pd.date_range(d_from, d_to)]})
-            daily_c = all_days.merge(daily_c, on="done_day", how="left").fillna(0)
+            daily_c = all_days.merge(daily_c, on="done_day", how="left")
+            daily_c["size"] = pd.to_numeric(daily_c["size"], errors="coerce").fillna(0).astype(int)
             fig2 = go.Figure(go.Scatter(x=daily_c["done_day"], y=daily_c["size"],
                                         mode="lines+markers",
                                         line=dict(color=TOKENS["success"])))
@@ -89,15 +96,16 @@ def render() -> None:
             st.plotly_chart(fig2, use_container_width=True)
 
         st.markdown("##### ⚡ Priority distribution (open work)")
-        open_tasks = df[df["status"].isin(["todo", "in_progress"])]
+        open_tasks = df[df["status"].isin(["todo", "in_progress", "backlog"])]
         if open_tasks.empty:
             _empty("No open tasks — everything is done. 🎉", "🎉")
         else:
             counts = open_tasks["priority_band"].value_counts().reindex(
-                ["high", "medium", "low"]).fillna(0)
+                ["critical", "high", "medium", "low"]).fillna(0)
             fig3 = go.Figure(go.Pie(labels=counts.index, values=counts.values,
                                     hole=0.45,
-                                    marker=dict(colors=[TOKENS["danger"],
+                                    marker=dict(colors=[TOKENS["sidebar"],
+                                                        TOKENS["danger"],
                                                         TOKENS["warning"], PRIMARY])))
             fig3.update_layout(height=250, margin=dict(t=10))
             st.plotly_chart(fig3, use_container_width=True)
@@ -168,7 +176,7 @@ def render() -> None:
 
         if english:
             edf = pd.DataFrame(english)
-            edf["logged_on"] = str(edf["logged_on"]).str[:10]
+            edf["logged_on"] = edf["logged_on"].astype(str).str[:10]
             st.markdown("##### 🗣 English minutes by type")
             efig = px.bar(edf, x="practice_type", y="minutes",
                           color="practice_type",

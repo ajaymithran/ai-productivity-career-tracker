@@ -10,6 +10,7 @@ from ai import prompts
 from ai.client import get_ai
 from ui.components import ui_kit as kit
 from ui.design import TOKENS
+from src.utils.dates import today as today_local
 
 GREETING = ("Hi! I'm your AI coach. I can analyse your week, surface skill gaps, "
             "or draft plans.\nEverything stays read-only; you approve anything before it counts.")
@@ -63,7 +64,7 @@ def _context_summary() -> dict:
 
 def render() -> None:
     kit.page_header("🤖 AI Coach", "Advice grounded in your own data — approval required always",
-                    date_context=date.today().strftime("%d %b %Y"))
+                    date_context=today_local().strftime("%d %b %Y"))
     kit.page_banner_demo()
 
     context = _context_summary()

@@ -6,6 +6,7 @@ import streamlit as st
 import data.source as source
 from ui.components import ui_kit as kit
 from ui.design import TOKENS
+from src.utils.dates import today as today_local
 
 KANBAN_COLS = ["pending", "in_progress", "review", "done"]
 KANBAN_LABEL = {"pending": "📋 To Do", "in_progress": "🚧 In Progress",
@@ -106,7 +107,7 @@ def render() -> None:
                 for p in [x for x in projects if x.get("status") == status]:
                     done_m, total_m = _progress(p, milestones)
                     target = str(p.get("target_date") or "—")[:10]
-                    late = target not in ("—",) and target < date.today().isoformat() \
+                    late = target not in ("—",) and target < today_local().isoformat() \
                         and status not in ("done", "review")
                     st.markdown(f"""
                       <div class="p-card" style="padding:.65rem .8rem;margin-bottom:.5rem">
@@ -137,7 +138,7 @@ def render() -> None:
                     "id": f"demo-p{len(dd()['projects'])+1}", "user_id": "demo",
                     "name": name.strip(), "description": desc.strip() or None,
                     "github_url": gh.strip() or None,
-                    "start_date": date.today().isoformat(),
+                    "start_date": today_local().isoformat(),
                     "target_date": tgt.isoformat() if tgt else None,
                     "status": "pending", "blockers": None, "notes": ""})
                 st.toast("Project created (demo)", icon="📁")

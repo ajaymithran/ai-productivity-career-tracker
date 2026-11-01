@@ -12,7 +12,7 @@ Current version: **v3.0** (persistence hardening, approval workflow, automation 
 - **Pandas / OpenPyXL / Plotly** — Excel import/export & interactive charts
 - **Gemini (free tier)** — suggestions & explanations ONLY; the tracker is fully functional without AI
 - **GitHub Actions** — daily deadline notices & weekly-review nudges, delivered **in-app only**
-- **Pytest** — 52 tests, no paid API required (AI calls are mocked)
+- **Pytest + Streamlit AppTest** — 65 automated tests (unit + real widget interaction), no paid API required (AI calls mocked)
 
 Design rules enforced by the code and the database:
 1. **Python decides, AI explains** — priority scoring, capacity math, deadline warnings are deterministic (`core/`); Gemini never computes.
@@ -62,13 +62,15 @@ Required `.env` values for **live** mode: `SUPABASE_URL`, `SUPABASE_ANON_KEY` (p
 ## What's verified vs. not (honest ledger)
 
 **Implemented and tested locally (pytest, no network):**
-- 8 pages boot and navigate (headless Streamlit HTTP 200 check)
-- Task create/update/complete/delete with priority scoring; deadline validation
+- 8 pages boot and navigate (AppTest real-render suite + headless Streamlit HTTP 200 check)
+- Task create/edit/complete/delete through the real widget pipeline (click-through tests); priority scoring; deadline validation
 - Approval workflow: reject leaves plan unchanged; unapproved activation raises `PermissionError`; latest decision wins; decision history persists
 - Local SQLite persistence across restarts; notification idempotency (retries add nothing)
 - Excel export (9-sheet workbook) and importer mapping/validation with duplicate-skipping
 - AI degradation without a key (honest fallback, never a crash); mocked provider path
-- 52 automated tests green
+- Timezone-aware day boundary (`TIMEZONE`, default `Asia/Kolkata`) so "due today" is correct on UTC cloud hosts
+- 65 automated tests green
+- Known harness limit (documented, not a gap): Streamlit's AppTest cannot click `st.form` submit buttons, so form-submit behavior is covered by the local SQLite create-task tests + manual smoke instead — verified via a minimal reproduction
 
 **Requires YOUR actions (not yet verified):**
 - Run `database/migrations/001_approval_history.sql` in Supabase SQL Editor (creates the append-only decision ledger; safe to re-run)
@@ -114,4 +116,5 @@ Put your workbook (e.g. `ajay_career_tracking.xlsx`) anywhere; in Settings → I
 - **"SECRET GUARD — commit blocked"** — you pasted a real value into `.env.example`. Move it to `.env` and blank the template; the hook is doing its job.
 - **AI Coach shows "not configured"** — `GEMINI_API_KEY` missing/invalid in `.env`; the page still works via the deterministic fallback.
 - **Sign-in errors** — run `scripts\check_auth.py`; the usual cause is the leaked password that hasn't been rotated yet.
+- **Timezone surprises ("due today" off by a few hours after deploy)** — set `TIMEZONE` in `.env` (default `Asia/Kolkata`); the app computes the day boundary from it.
 - **Data gone after refresh?** — you were in demo mode (labelled 🧪). Use local or live mode for persistence.
