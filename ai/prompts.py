@@ -30,7 +30,7 @@ def build_context(*, tasks: list[dict], skills: list[dict], goals: list[dict],
         "due_today": [{"title": t["title"], "minutes": t.get("estimated_minutes")}
                       for t in today_tasks][:10],
         "top_priority_no_due": [
-            {"title": t["title"], "score": t.get("priority_score")}
+            {"title": t.get("title") or t.get("name", ""), "score": t.get("priority_score", 0)}
             for t in tasks if not t.get("due_date")
             and t.get("status") not in ("done", "wont_do")][:5],
         "skill_gaps": [{"name": s["name"], "level": s.get("current_level"),

@@ -47,6 +47,20 @@ def _reply(prompt: str, context: dict) -> str:
     return text
 
 
+def _context_summary() -> dict:
+    """Deterministic facts packet for the coach (tasks, skills, goals)."""
+    tasks = source.load_tasks(active_only=True)
+    skills = source.load_skills()
+    goals = source.load_goals()
+    settings = source.load_settings()
+    return prompts.build_context(
+        tasks=tasks,
+        skills=skills,
+        goals=goals,
+        availability_minutes=int(settings.get("daily_study_minutes", 120)),
+    )
+
+
 def render() -> None:
     kit.page_header("🤖 AI Coach", "Advice grounded in your own data — approval required always",
                     date_context=date.today().strftime("%d %b %Y"))
